@@ -22,15 +22,15 @@ fn main() -> std::io::Result<()> {
         let mut buf = [0; BUFFER_SIZE];
         let (_, src) = incoming.recv_from(&mut buf)?;
 
-        if drop_filter.is_some() {
-            let send = drop_filter.unwrap().apply(buf);
+        if let Some(f) = drop_filter {
+            let send = f.apply(buf);
             if send.is_none() {
                 // filter applies, skip this packet!
                 continue;
             }
         }
 
-        outgoing.send_to(&buf, &src)?;
+        outgoing.send_to(&buf, src)?;
     }
 }
 
