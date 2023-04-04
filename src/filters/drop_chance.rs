@@ -6,7 +6,7 @@ use super::Filter;
 
 #[derive(Copy, Clone)]
 pub struct DropChance {
-    pub drop_percent: f64
+    pub drop_percent: f64,
 }
 
 impl Filter for DropChance {
