@@ -31,7 +31,7 @@ async fn main() -> std::io::Result<()> {
                     println!("received {:?} from {}", &data[..len], origin);
 
                     if let Entry::Vacant(_) = address_map.entry(origin) {
-                        let client_socket = get_available_socket()
+                        let client_socket = UdpSocket::bind(("127.0.0.1", 0))
                             .await
                             .expect("unable to bind client socket");
 
@@ -45,6 +45,7 @@ async fn main() -> std::io::Result<()> {
 
                     let destination_socket = address_map.get(&origin);
                     if let Some(s) = destination_socket {
+                        println!("sending {} bytes to {}", len, s.peer_addr().unwrap());
                         s.send(&data[..len])
                             .await
                             .expect("connection to server_addr failed");
@@ -59,17 +60,6 @@ async fn main() -> std::io::Result<()> {
             }
         }
     }
-}
-
-async fn get_available_socket() -> Option<UdpSocket> {
-    for port in 1025..65535 {
-        match UdpSocket::bind(("127.0.0.1", port)).await {
-            Ok(socket) => return Some(socket),
-            Err(_) => continue,
-        }
-    }
-
-    None
 }
 
 #[derive(Parser, Debug)]
