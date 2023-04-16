@@ -36,7 +36,7 @@ impl ChanneledSocket {
     /// Create a new ChanneledSocket, injecting its UdpSocket and a sender that determines where it routes traffic to.
     async fn new(socket: UdpSocket, sender: Sender<Datagram>) -> ChanneledSocket {
         println!("starting channeled socket for {:?}", socket.local_addr());
-        
+
         let (producer, mut receiver) = channel::<Datagram>(100);
 
         // receiver recv -> socket send
@@ -120,7 +120,7 @@ impl Router {
                             .await
                             .expect("failed to connect proxy socket to server address");
 
-                        println!("proxy socket created on port {}", proxy_socket.local_addr().unwrap().port());
+                        println!("proxy socket created on port {:?}", proxy_socket.local_addr());
 
                         let (router_sender, proxy_receiver) = channel::<Datagram>(100);
                         let channeled_socket =
