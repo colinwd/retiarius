@@ -46,11 +46,16 @@ impl ChanneledSocket {
         let _socket_send = tokio::spawn(async move {
             loop {
                 if let Some(message) = receiver.recv().await {
-                    println!("sending {:?} to {}", &message.payload, message.origin);
-                    send_socket
-                        .send_to(&message.payload, message.origin)
-                        .await
-                        .expect("failed to send on socket");
+                    println!("sending {:?} to {:?}", &message.payload, message.destination);
+
+                    if let Some(destination) = message.destination {
+                        send_socket
+                            .send_to(&message.payload, destination)
+                            .await
+                            .expect("failed to send on socket");
+                    } else {
+                        unreachable!("message should always have a destination by now");
+                    }
                 }
             }
         });
@@ -157,8 +162,12 @@ impl Router {
                         routes.insert(message.origin, route);
                     }
 
+                    // forward to server
                     if let Some(route) = routes.get(&message.origin) {
                         println!("sending message to proxy socket");
+
+                        let message = message.set_destination(server_addr);
+
                         route
                             .channeled_socket
                             .get_input_sender()
