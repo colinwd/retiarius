@@ -1,6 +1,7 @@
 use std::{
     collections::{hash_map::Entry, HashMap},
     net::SocketAddr,
+    sync::Arc,
 };
 
 use bytes::Bytes;
@@ -8,13 +9,13 @@ use clap::Parser;
 use tokio::{
     io::Interest,
     net::UdpSocket,
-    sync::mpsc::{channel, Receiver, Sender},
+    sync::mpsc::{channel, error::TryRecvError, Receiver, Sender},
     task::JoinHandle,
 };
 
 pub const BUFFER_SIZE: usize = 1500;
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct Datagram {
     payload: Bytes,
     origin: SocketAddr,
@@ -30,58 +31,59 @@ impl Datagram {
 
 struct ChanneledSocket {
     producer: Sender<Datagram>,
+    _socket_send: JoinHandle<()>,
+    _socket_recv: JoinHandle<()>,
 }
 
 impl ChanneledSocket {
     /// Create a new ChanneledSocket, injecting its UdpSocket and a sender that determines where it routes traffic to.
     async fn new(socket: UdpSocket, sender: Sender<Datagram>) -> ChanneledSocket {
-        println!("starting channeled socket for {:?}", socket.local_addr());
-
+        let socket = Arc::new(socket);
         let (producer, mut receiver) = channel::<Datagram>(100);
 
         // receiver recv -> socket send
-        // socket recv -> sender send
-        tokio::spawn(async move {
+        let send_socket = socket.clone();
+        let _socket_send = tokio::spawn(async move {
             loop {
-                let ready = socket
-                    .ready(Interest::READABLE | Interest::WRITABLE)
-                    .await
-                    .expect("failed to determine read/write interest of socket");
-
-                if ready.is_readable() {
-                    let mut data = [0; BUFFER_SIZE];
-
-                    if let Ok((len, origin)) = &socket.try_recv_from(&mut data[..]) {
-                        println!("received {:?} from {}", &data[..*len], origin);
-
-                        let bytes = Bytes::copy_from_slice(&data[..*len]);
-                        let datagram = Datagram {
-                            payload: bytes,
-                            origin: *origin,
-                            destination: None,
-                        };
-
-                        println!("Sending {:?} on channel", datagram);
-                        sender
-                            .send(datagram)
-                            .await
-                            .expect("failed to send message on channel");
-                    }
-                }
-
-                if ready.is_writable() {
-                    if let Ok(message) = receiver.try_recv() {
-                        println!("sending {:?} to {}", &message.payload, message.origin);
-                        socket
-                            .send_to(&message.payload, message.origin)
-                            .await
-                            .expect("failed to send on socket");
-                    }
+                if let Some(message) = receiver.recv().await {
+                    println!("sending {:?} to {}", &message.payload, message.origin);
+                    send_socket
+                        .send_to(&message.payload, message.origin)
+                        .await
+                        .expect("failed to send on socket");
                 }
             }
         });
 
-        ChanneledSocket { producer }
+        let recv_socket = socket.clone();
+        let _socket_recv = tokio::spawn(async move {
+            loop {
+                let mut data = [0; BUFFER_SIZE];
+
+                if let Ok((len, origin)) = recv_socket.recv_from(&mut data[..]).await {
+                    println!("received {:?} from {}", &data[..len], origin);
+
+                    let bytes = Bytes::copy_from_slice(&data[..len]);
+                    let datagram = Datagram {
+                        payload: bytes,
+                        origin: origin,
+                        destination: None,
+                    };
+
+                    println!("Sending {:?} on channel", datagram);
+                    sender
+                        .send(datagram)
+                        .await
+                        .expect("failed to send message on channel");
+                }
+            }
+        });
+
+        ChanneledSocket {
+            producer,
+            _socket_send,
+            _socket_recv,
+        }
     }
 
     /// Get the input sender of this ChanneledSocket
@@ -94,7 +96,7 @@ struct Router;
 
 struct Route {
     channeled_socket: ChanneledSocket,
-    receiver: Receiver<Datagram>,
+    _recv_task: JoinHandle<()>,
 }
 
 impl Router {
@@ -105,9 +107,9 @@ impl Router {
     ) -> JoinHandle<()> {
         let mut routes = HashMap::new();
 
-        tokio::spawn(async move {
+        let router = tokio::spawn(async move {
             loop {
-                if let Ok(message) = client_receiver.try_recv() {
+                if let Some(message) = client_receiver.recv().await {
                     println!("router received message {:?}", message);
 
                     if let Entry::Vacant(_) = routes.entry(message.origin) {
@@ -120,14 +122,36 @@ impl Router {
                             .await
                             .expect("failed to connect proxy socket to server address");
 
-                        println!("proxy socket created on port {:?}", proxy_socket.local_addr());
+                        println!(
+                            "proxy socket created on port {:?}",
+                            proxy_socket.local_addr()
+                        );
 
-                        let (router_sender, proxy_receiver) = channel::<Datagram>(100);
+                        let (router_sender, mut proxy_receiver) = channel::<Datagram>(100);
                         let channeled_socket =
                             ChanneledSocket::new(proxy_socket, router_sender).await;
+
+                        let client_sender_clone = client_sender.clone();
+
+                        let destination = message.origin.clone();
+
+                        let _recv_task = tokio::spawn(async move {
+                            loop {
+                                if let Some(received) = proxy_receiver.recv().await {
+                                    println!("Received message from proxy socket: {:?}", received);
+
+                                    let received = received.set_destination(destination);
+                                    client_sender_clone
+                                        .send(received)
+                                        .await
+                                        .expect("failed to send to client sender");
+                                }
+                            }
+                        });
+
                         let route = Route {
                             channeled_socket,
-                            receiver: proxy_receiver,
+                            _recv_task,
                         };
 
                         routes.insert(message.origin, route);
@@ -143,26 +167,18 @@ impl Router {
                             .expect("failed to send message from router to proxy socket");
                     }
                 }
-
-                for (addr, route) in routes.iter_mut() {
-                    let receiver = &mut route.receiver;
-                    if let Ok(message) = receiver.try_recv() {
-                        println!("Received message from proxy socket: {:?}", message);
-                        let message = message.set_destination(*addr);
-                        client_sender
-                            .send(message)
-                            .await
-                            .expect("failed to send to client sender");
-                    }
-                }
             }
-        })
+        });
+
+        router
     }
 }
 
 #[tokio::main]
 async fn main() -> std::io::Result<()> {
     let args = Args::parse();
+
+    println!("starting up");
 
     let client_socket = UdpSocket::bind(("0.0.0.0", args.listen_port))
         .await
